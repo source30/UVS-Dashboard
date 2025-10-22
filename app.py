@@ -1273,13 +1273,37 @@ elif page == "🤖 AI Dashboard":
             - Site-specific learning adapts to unique conditions
             """)
 
+
+# REPLACE the "elif page == "🗺️ Site Map":" section with this:
+
 elif page == "🗺️ Site Map":
     st.header("Interactive Site Map")
     
-    # Get sites with coordinates
+    # Get all unique clients
+    all_clients = set()
+    for site in st.session_state.sites.values():
+        client = site.get('client', 'No Client')
+        if client and client.strip():
+            all_clients.add(client)
+        else:
+            all_clients.add('No Client')
+    
+    # Client filter
+    client_list = ['All Clients'] + sorted(list(all_clients))
+    selected_client = st.selectbox("🔍 Filter by Client", client_list, index=0)
+    
+    # Get sites with coordinates (filtered by client)
     sites_with_coords = []
     for site_id, site in st.session_state.sites.items():
         site_name = site['name']
+        site_client = site.get('client', 'No Client')
+        if not site_client or not site_client.strip():
+            site_client = 'No Client'
+        
+        # Apply client filter
+        if selected_client != 'All Clients' and site_client != selected_client:
+            continue
+        
         if site_name in st.session_state.weather_stations:
             station_info = st.session_state.weather_stations[site_name]
             lat = station_info.get('lat')
@@ -1300,10 +1324,15 @@ elif page == "🗺️ Site Map":
                 })
     
     if not sites_with_coords:
-        st.warning("⚠️ No sites have coordinate data. Upload the Excel file with coordinates to see the map.")
+        if selected_client == 'All Clients':
+            st.warning("⚠️ No sites have coordinate data. Upload the Excel file with coordinates to see the map.")
+        else:
+            st.warning(f"⚠️ No sites found for client: **{selected_client}** with coordinate data.")
     else:
-        # Display summary
-        col1, col2, col3, col4 = st.columns(4)
+        # Display summary and rain controls
+        st.markdown(f"### Showing: **{selected_client}** ({len(sites_with_coords)} site{'s' if len(sites_with_coords) != 1 else ''})")
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("Sites on Map", len(sites_with_coords))
         high_count = sum(1 for s in sites_with_coords if "HIGH" in s['priority'])
         col2.metric("🔴 High Priority", high_count)
@@ -1312,9 +1341,16 @@ elif page == "🗺️ Site Map":
         low_count = sum(1 for s in sites_with_coords if "LOW" in s['priority'] or "OPTIMAL" in s['priority'])
         col4.metric("🟢 Low Priority", low_count)
         
+        # Rain radar controls
+        with col5:
+            st.markdown("#### 🌧️ Rain Radar")
+            show_rain = st.toggle("Show Rain Animation", value=False)
+            if show_rain:
+                rain_speed = st.select_slider("Animation Speed", options=["Slow", "Medium", "Fast"], value="Medium")
+                rain_opacity = st.slider("Opacity", min_value=0.1, max_value=1.0, value=0.6, step=0.1)
+        
         st.divider()
         
-        # Create map HTML with Leaflet
         # Calculate center of all sites
         center_lat = sum(s['lat'] for s in sites_with_coords) / len(sites_with_coords)
         center_lon = sum(s['lon'] for s in sites_with_coords) / len(sites_with_coords)
@@ -1410,6 +1446,166 @@ elif page == "🗺️ Site Map":
             }}).addTo(map).bindPopup(`{popup_html_escaped}`, {{maxWidth: 350}});
             """
         
+        # Add animated rain radar if toggle is on
+        rain_animation_js = ""
+        if show_rain:
+            # Set animation speed
+            speed_map = {"Slow": 2000, "Medium": 1000, "Fast": 500}
+            animation_speed = speed_map[rain_speed]
+            
+            rain_animation_js = f"""
+            // Animated Rain Radar from RainViewer
+            var rainLayers = {{}};
+            var animationPosition = 0;
+            var animationTimer = null;
+            var radarTimestamps = [];
+            var currentLayer = null;
+            var rainOpacity = {rain_opacity};
+            
+            // Timeline display
+            var timelineDiv = L.control({{position: 'bottomleft'}});
+            timelineDiv.onAdd = function(map) {{
+                var div = L.DomUtil.create('div', 'timeline-control');
+                div.style.background = 'rgba(255,255,255,0.9)';
+                div.style.padding = '10px';
+                div.style.borderRadius = '5px';
+                div.style.fontSize = '14px';
+                div.style.fontWeight = 'bold';
+                div.innerHTML = '<div id="timeline-text">Loading rain data...</div>';
+                return div;
+            }};
+            timelineDiv.addTo(map);
+            
+            // Play/Pause control
+            var controlDiv = L.control({{position: 'topleft'}});
+            controlDiv.onAdd = function(map) {{
+                var div = L.DomUtil.create('div', 'rain-control');
+                div.style.background = 'white';
+                div.style.padding = '5px';
+                div.style.borderRadius = '3px';
+                div.style.cursor = 'pointer';
+                div.style.fontSize = '24px';
+                div.innerHTML = '⏸️';
+                div.onclick = function() {{
+                    if (animationTimer) {{
+                        stopAnimation();
+                        div.innerHTML = '▶️';
+                    }} else {{
+                        startAnimation();
+                        div.innerHTML = '⏸️';
+                    }}
+                }};
+                return div;
+            }};
+            controlDiv.addTo(map);
+            
+            function formatTime(timestamp) {{
+                var date = new Date(timestamp * 1000);
+                var now = new Date();
+                var hours = date.getHours().toString().padStart(2, '0');
+                var minutes = date.getMinutes().toString().padStart(2, '0');
+                
+                if (date > now) {{
+                    return hours + ':' + minutes + ' (Forecast)';
+                }} else {{
+                    return hours + ':' + minutes;
+                }}
+            }}
+            
+            function showFrame(frameIndex) {{
+                if (currentLayer) {{
+                    map.removeLayer(currentLayer);
+                }}
+                
+                var timestamp = radarTimestamps[frameIndex];
+                if (rainLayers[timestamp]) {{
+                    currentLayer = rainLayers[timestamp];
+                    currentLayer.addTo(map);
+                    
+                    var timelineText = formatTime(timestamp);
+                    var now = Date.now() / 1000;
+                    if (timestamp < now) {{
+                        timelineText = '⏮️ ' + timelineText + ' (Past)';
+                    }} else if (timestamp > now) {{
+                        timelineText = '⏭️ ' + timelineText + ' (Future)';
+                    }} else {{
+                        timelineText = '⏺️ ' + timelineText + ' (Now)';
+                    }}
+                    document.getElementById('timeline-text').innerHTML = timelineText;
+                }}
+            }}
+            
+            function startAnimation() {{
+                animationTimer = setInterval(function() {{
+                    animationPosition++;
+                    if (animationPosition >= radarTimestamps.length) {{
+                        animationPosition = 0;
+                    }}
+                    showFrame(animationPosition);
+                }}, {animation_speed});
+            }}
+            
+            function stopAnimation() {{
+                if (animationTimer) {{
+                    clearInterval(animationTimer);
+                    animationTimer = null;
+                }}
+            }}
+            
+            // Fetch radar data from RainViewer
+            fetch('https://api.rainviewer.com/public/weather-maps.json')
+                .then(response => response.json())
+                .then(data => {{
+                    // Get past radar frames (last 24 hours, but API typically provides last 2 hours)
+                    var pastFrames = data.radar.past || [];
+                    
+                    // Get nowcast/forecast frames (next 30-60 minutes typically)
+                    var forecastFrames = data.radar.nowcast || [];
+                    
+                    // Combine all timestamps
+                    var allFrames = pastFrames.concat(forecastFrames);
+                    
+                    allFrames.forEach(function(frame) {{
+                        var timestamp = frame.time;
+                        radarTimestamps.push(timestamp);
+                        
+                        // Pre-create all layers with custom opacity
+                        rainLayers[timestamp] = L.tileLayer(
+                            'https://tilecache.rainviewer.com/v2/radar/' + timestamp + '/256/{{z}}/{{x}}/{{y}}/2/1_1.png',
+                            {{
+                                opacity: rainOpacity,
+                                zIndex: 10
+                            }}
+                        );
+                    }});
+                    
+                    if (radarTimestamps.length > 0) {{
+                        // Find the frame closest to current time
+                        var now = Date.now() / 1000;
+                        var closestIndex = 0;
+                        var minDiff = Math.abs(radarTimestamps[0] - now);
+                        
+                        for (var i = 1; i < radarTimestamps.length; i++) {{
+                            var diff = Math.abs(radarTimestamps[i] - now);
+                            if (diff < minDiff) {{
+                                minDiff = diff;
+                                closestIndex = i;
+                            }}
+                        }}
+                        
+                        animationPosition = closestIndex;
+                        showFrame(animationPosition);
+                        startAnimation();
+                    }} else {{
+                        document.getElementById('timeline-text').innerHTML = 'Rain data unavailable';
+                    }}
+                }})
+                .catch(error => {{
+                    console.log('Rain radar not available:', error);
+                    document.getElementById('timeline-text').innerHTML = 'Rain data unavailable';
+                }});
+            """
+        
         map_html = f"""
         <!DOCTYPE html>
         <html>
@@ -1419,6 +1615,13 @@ elif page == "🗺️ Site Map":
             <style>
                 #map {{ height: 600px; width: 100%; }}
                 body {{ margin: 0; padding: 0; }}
+                .timeline-control {{
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+                }}
+                .rain-control {{
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+                    user-select: none;
+                }}
             </style>
         </head>
         <body>
@@ -1432,6 +1635,8 @@ elif page == "🗺️ Site Map":
                 }}).addTo(map);
                 
                 {markers_js}
+                
+                {rain_animation_js}
             </script>
         </body>
         </html>
@@ -1441,15 +1646,24 @@ elif page == "🗺️ Site Map":
         
         st.divider()
         
-        # Legend
-        st.markdown("### Map Legend")
-        col1, col2, col3, col4 = st.columns(4)
-        col1.markdown("🔴 **High Priority** - Critical watering needed")
-        col2.markdown("🟡 **Medium Priority** - Watering recommended")
-        col3.markdown("🟢 **Low/Optimal** - Adequate moisture")
-        col4.markdown("🔵 **No Data** - No readings logged yet")
-# PASTE THIS IMMEDIATELY AFTER PART 4 (NO GAPS) - THIS IS THE FINAL PART
-
+        # Legend and info
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            st.markdown("### Map Legend")
+            subcol1, subcol2, subcol3, subcol4 = st.columns(4)
+            subcol1.markdown("🔴 **High Priority** - Critical watering needed")
+            subcol2.markdown("🟡 **Medium Priority** - Watering recommended")
+            subcol3.markdown("🟢 **Low/Optimal** - Adequate moisture")
+            subcol4.markdown("🔵 **No Data** - No readings logged yet")
+        
+        with col2:
+            if show_rain:
+                st.markdown("### Rain Controls")
+                st.info("⏸️ = Pause\n\n▶️ = Play")
+        
+        if show_rain:
+            st.success("🌧️ **Animated Rain Radar Active** - Shows past observations and future forecast. Click ⏸️/▶️ to pause/play.")
 elif page == "🌧️ Rain Radar":
     st.header("Melbourne Rain Radar")
     w = st.session_state.weather
